@@ -412,3 +412,235 @@ class Game:
         self.flashes.append([cx, cy, 18])
         self.shake = 10
         self.audio.play("boom")
+
+    # ----- Input -----
+    def handle_events(self):
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                self.quit()
+            elif e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_ESCAPE:
+                    self.quit()
+                elif e.key == pygame.K_SPACE and not self.paused:
+                    self.launch()
+                elif e.key == pygame.K_r:
+                    self.reset()
+                elif e.key == pygame.K_m:
+                    self.audio.toggle_music()
+                elif e.key == pygame.K_p and self.state in ("ready", "playing"):
+                    self.paused = not self.paused
+            elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and not self.paused:
+                self.launch()
+            elif e.type == pygame.MOUSEMOTION and not self.paused:
+                self.paddle.centerx = e.pos[0]
+        if not self.paused:
+            keys = pygame.key.get_pressed()
+            if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                self.paddle.x -= PADDLE_SPEED
+            if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                self.paddle.x += PADDLE_SPEED
+        self.paddle.clamp_ip(self.canvas.get_rect())
+
+    # ----- Update -----
+    def normalize(self, b):
+        sp = math.hypot(b.vx, b.vy)
+        if sp == 0:
+            return
+        k = self.speed / sp
+        b.vx *= k
+        b.vy *= k
+        min_vy = self.speed * 0.25  # cegah bola melaju hampir datar
+        if abs(b.vy) < min_vy:
+            b.vy = math.copysign(min_vy, b.vy if b.vy else -1)
+            b.vx = math.copysign(math.sqrt(self.speed ** 2 - b.vy ** 2), b.vx if b.vx else 1)
+
+    def update_ball(self, b):
+        b.x += b.vx
+        b.y += b.vy
+        if b.x - BALL_R <= 0:
+            b.x, b.vx = BALL_R, abs(b.vx)
+        elif b.x + BALL_R >= WIDTH:
+            b.x, b.vx = WIDTH - BALL_R, -abs(b.vx)
+        if b.y - BALL_R <= 0:
+            b.y, b.vy = BALL_R, abs(b.vy)
+        if b.y - BALL_R > HEIGHT:
+            return False
+
+        rect = pygame.Rect(int(b.x - BALL_R), int(b.y - BALL_R), BALL_R * 2, BALL_R * 2)
+
+        if rect.colliderect(self.paddle) and b.vy > 0:
+            off = max(-1.0, min(1.0, (b.x - self.paddle.centerx) / (self.paddle.width / 2)))
+            ang = math.radians(off * 60)
+            b.vx, b.vy = self.speed * math.sin(ang), -self.speed * math.cos(ang)
+            b.y = self.paddle.top - BALL_R - 1
+            self.audio.play("paddle")
+
+        for brick in self.bricks:
+            r = brick["rect"]
+            if rect.colliderect(r):
+                ox = min(rect.right - r.left, r.right - rect.left)
+                oy = min(rect.bottom - r.top, r.bottom - rect.top)
+                if ox < oy:
+                    b.vx = -abs(b.vx) if rect.centerx < r.centerx else abs(b.vx)
+                else:
+                    b.vy = -abs(b.vy) if rect.centery < r.centery else abs(b.vy)
+                brick["hp"] -= 1
+                if brick["hp"] <= 0:
+                    self.destroy_brick(brick)
+                else:
+                    self.spawn_particles(rect.center, WHITE, 3)
+                    self.audio.play("hit")
+                break
+
+        self.normalize(b)
+        return True
+
+    def update(self):
+        dt = 1.0 / FPS
+        self.banner = max(0.0, self.banner - dt)
+        self.shake = max(0, self.shake - 1)
+
+        for p in self.particles:
+            p[0] += p[2]
+            p[1] += p[3]
+            p[3] += 0.15
+            p[4] -= 1
+        self.particles = [p for p in self.particles if p[4] > 0]
+        for f in self.flashes:
+            f[2] -= 1
+        self.flashes = [f for f in self.flashes if f[2] > 0]
+
+        # lebar paddle (berubah halus)
+        target = int(self.base_w * (WIDE_FACTOR if self.wide_t > 0 else 1))
+        w = self.paddle.width
+        w = min(target, w + 6) if w < target else max(target, w - 6)
+        cx = self.paddle.centerx
+        self.paddle.width = w
+        self.paddle.centerx = cx
+        self.paddle.clamp_ip(self.canvas.get_rect())
+
+        if self.state == "ready":
+            b = self.balls[0]
+            b.x, b.y = self.paddle.centerx, self.paddle.top - BALL_R - 1
+            return
+        if self.state != "playing":
+            return
+
+        self.wide_t = max(0.0, self.wide_t - dt)
+        self.boom_t = max(0.0, self.boom_t - dt)
+
+        self.balls = [b for b in self.balls if self.update_ball(b)]
+
+        for g in self.gifts[:]:
+            g[1] += GIFT_SPEED
+            if pygame.Rect(g[0] - GIFT_R, g[1] - GIFT_R, GIFT_R * 2, GIFT_R * 2).colliderect(self.paddle):
+                self.apply_gift(g[2])
+                self.gifts.remove(g)
+            elif g[1] > HEIGHT + GIFT_R:
+                self.gifts.remove(g)
+
+        if not self.bricks:
+            self.next_level()
+        elif not self.balls:
+            self.lose_life()
+
+    # ----- Gambar -----
+    def text(self, txt, font, color, center):
+        surf = font.render(txt, True, color)
+        self.canvas.blit(surf, surf.get_rect(center=center))
+
+    def draw(self):
+        c = self.canvas
+        c.fill(BG)
+
+        for b in self.bricks:
+            pygame.draw.rect(c, b["color"], b["rect"], border_radius=4)
+            if b["hp"] > 1:
+                pygame.draw.rect(c, WHITE, b["rect"], width=b["hp"] * 2 - 1, border_radius=4)
+
+        for x, y, kind in self.gifts:
+            label, col = GIFT_TYPES[kind]
+            pygame.draw.circle(c, col, (int(x), int(y)), GIFT_R)
+            pygame.draw.circle(c, WHITE, (int(x), int(y)), GIFT_R, 2)
+            self.text(label, self.small, WHITE, (int(x), int(y)))
+
+        pad_col = (130, 200, 255) if self.wide_t > 0 else WHITE
+        pygame.draw.rect(c, pad_col, self.paddle, border_radius=7)
+        ball_col = ORANGE if self.boom_t > 0 else WHITE
+        for b in self.balls:
+            pygame.draw.circle(c, ball_col, (int(b.x), int(b.y)), BALL_R)
+
+        for x, y, _vx, _vy, life, col in self.particles:
+            size = max(1, life // 10)
+            pygame.draw.rect(c, col, (int(x), int(y), size, size))
+        for x, y, life in self.flashes:
+            pygame.draw.circle(c, ORANGE, (int(x), int(y)), 90 - life * 4, 3)
+
+        # HUD
+        c.blit(self.font.render(f"Skor: {self.score}", True, WHITE), (12, 10))
+        self.text(f"Level {self.level}", self.font, WHITE, (WIDTH // 2, 22))
+        lives = self.font.render(f"Nyawa: {self.lives}", True, WHITE)
+        c.blit(lives, (WIDTH - lives.get_width() - 12, 10))
+        x = 12
+        for label, t, col in (("Paddle panjang", self.wide_t, (130, 200, 255)),
+                              ("Bola ledak", self.boom_t, ORANGE)):
+            if t > 0:
+                s = self.small.render(f"{label} {t:.1f}s", True, col)
+                c.blit(s, (x, 44))
+                x += s.get_width() + 24
+        hint = self.small.render("P jeda  |  M musik", True, (120, 125, 150))
+        c.blit(hint, (WIDTH - hint.get_width() - 12, HEIGHT - 24))
+
+        if self.banner > 0 and self.state != "gameover":
+            self.text(f"LEVEL {self.level}", self.big, WHITE, (WIDTH // 2, 375))
+            self.text(self.level_name, self.font, (190, 195, 220), (WIDTH // 2, 420))
+        if self.state == "ready":
+            if self.level == 1:
+                for i, (txt, col) in enumerate([
+                        ("3  = tambah bola jadi 3", GIFT_TYPES["multi"][1]),
+                        ("W  = paddle panjang 3 detik", GIFT_TYPES["wide"][1]),
+                        ("B  = bola ledak (3 brick terdekat)", GIFT_TYPES["boom"][1])]):
+                    self.text(txt, self.small, col, (WIDTH // 2, 455 + i * 22))
+            self.text("Tekan SPASI atau klik untuk meluncurkan bola", self.font, WHITE,
+                      (WIDTH // 2, 525))
+
+        if self.state == "gameover":
+            shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            shade.fill((0, 0, 0, 150))
+            c.blit(shade, (0, 0))
+            self.text("GAME OVER", self.big, (239, 83, 80), (WIDTH // 2, HEIGHT // 2 - 20))
+            self.text(f"Skor akhir: {self.score}  |  Level: {self.level}", self.font, WHITE,
+                      (WIDTH // 2, HEIGHT // 2 + 30))
+            self.text("Tekan R untuk main lagi", self.font, WHITE, (WIDTH // 2, HEIGHT // 2 + 62))
+        elif self.paused:
+            shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            shade.fill((0, 0, 0, 130))
+            c.blit(shade, (0, 0))
+            self.text("JEDA", self.big, WHITE, (WIDTH // 2, HEIGHT // 2))
+
+        ox = random.randint(-4, 4) if self.shake else 0
+        oy = random.randint(-4, 4) if self.shake else 0
+        self.screen.fill(BG)
+        self.screen.blit(c, (ox, oy))
+        pygame.display.flip()
+
+    # ----- Loop -----
+    def quit(self):
+        pygame.quit()
+        sys.exit()
+
+    def run(self):
+        was_paused = False
+        while True:
+            self.handle_events()
+            if self.paused != was_paused:
+                (pygame.mixer.pause if self.paused else pygame.mixer.unpause)()
+                was_paused = self.paused
+            if not self.paused:
+                self.update()
+            self.draw()
+            self.clock.tick(FPS)
+
+
+if __name__ == "__main__":
+    Game().run()
