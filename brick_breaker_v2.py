@@ -313,3 +313,102 @@ class Game:
         self.audio = Audio()
         self.audio.start_music()
         self.reset()
+
+    # ----- State -----
+    def reset(self):
+        self.score = 0
+        self.lives = 3
+        self.level = 1
+        self.paused = False
+        self.paddle = pygame.Rect((WIDTH - PADDLE_W) // 2, HEIGHT - 40, PADDLE_W, PADDLE_H)
+        self.setup_level()
+
+    def setup_level(self):
+        self.speed, self.base_w, p2, p3, self.gift_chance = level_params(self.level)
+        self.level_name, self.bricks = build_bricks(self.level, p2, p3)
+        self.gifts, self.particles, self.flashes = [], [], []
+        self.wide_t = self.boom_t = 0.0
+        self.shake = 0
+        self.banner = 2.5
+        self.paddle.width = self.base_w
+        self.paddle.centerx = WIDTH // 2
+        self.reset_ball()
+
+    def reset_ball(self):
+        self.balls = [Ball(self.paddle.centerx, self.paddle.top - BALL_R - 1, stuck=True)]
+        self.state = "ready"
+
+    def launch(self):
+        if self.state == "ready":
+            a = math.radians(random.choice([-20, 20]))
+            b = self.balls[0]
+            b.vx, b.vy, b.stuck = self.speed * math.sin(a), -self.speed * math.cos(a), False
+            self.state = "playing"
+
+    def next_level(self):
+        self.level += 1
+        self.audio.play("levelup")
+        self.setup_level()
+
+    def lose_life(self):
+        self.lives -= 1
+        self.gifts.clear()
+        self.wide_t = self.boom_t = 0.0
+        if self.lives <= 0:
+            self.state = "gameover"
+            self.audio.play("gameover")
+        else:
+            self.audio.play("lose")
+            self.reset_ball()
+
+    # ----- Efek -----
+    def spawn_particles(self, pos, color, n):
+        for _ in range(n):
+            a = random.uniform(0, math.tau)
+            sp = random.uniform(1, 4)
+            self.particles.append([pos[0], pos[1], math.cos(a) * sp, math.sin(a) * sp - 1,
+                                   random.randint(20, 40), color])
+
+    def maybe_drop_gift(self, pos):
+        if random.random() < self.gift_chance:
+            self.gifts.append([float(pos[0]), float(pos[1]), random.choice(list(GIFT_TYPES))])
+
+    def apply_gift(self, kind):
+        self.audio.play("gift")
+        if kind == "multi":
+            for ang in (-25, 25):
+                if len(self.balls) >= MAX_BALLS:
+                    break
+                a = math.radians(ang)
+                self.balls.append(Ball(self.paddle.centerx + ang * 0.4, self.paddle.top - BALL_R - 1,
+                                       self.speed * math.sin(a), -self.speed * math.cos(a)))
+        elif kind == "wide":
+            self.wide_t = WIDE_TIME
+        elif kind == "boom":
+            self.boom_t = BOOM_TIME
+
+    def destroy_brick(self, brick, sound=True, chain=True):
+        if brick not in self.bricks:
+            return
+        self.bricks.remove(brick)
+        self.score += 10 * brick["max"]
+        center = brick["rect"].center
+        self.spawn_particles(center, brick["color"], 8)
+        self.maybe_drop_gift(center)
+        if sound:
+            self.audio.play("break")
+        if chain and self.boom_t > 0:
+            self.explode(center)
+
+    def explode(self, center):
+        cx, cy = center
+        victims = sorted(self.bricks, key=lambda o: (o["rect"].centerx - cx) ** 2
+                         + (o["rect"].centery - cy) ** 2)[:3]
+        if not victims:
+            return
+        for v in victims:
+            self.spawn_particles(v["rect"].center, ORANGE, 6)
+            self.destroy_brick(v, sound=False, chain=False)
+        self.flashes.append([cx, cy, 18])
+        self.shake = 10
+        self.audio.play("boom")
